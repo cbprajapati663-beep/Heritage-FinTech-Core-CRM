@@ -903,7 +903,17 @@
             </div>
             <div class="form-group">
                 <label>Agency / Client Name *</label>
-                <input type="text" id="t_agencyName" placeholder="e.g. Shreeji Auto Consultant" required>
+                <input type="text" id="t_agencyName" placeholder="e.g. Shree Auto Consultant" required>
+            </div>
+            <div class="form-group" style="display:flex; gap:8px;">
+                <div style="flex:1;">
+                    <label>Head Office Address *</label>
+                    <input type="text" id="t_headOffice" placeholder="e.g. Mehsana, Gujarat" required>
+                </div>
+                <div style="flex:1;">
+                    <label>Contact Phone number *</label>
+                    <input type="tel" id="t_contactPhone" placeholder="e.g. +91 7600211085" required>
+                </div>
             </div>
             <div class="form-group">
                 <label>Login Password *</label>
@@ -1398,6 +1408,8 @@
             const defaultTenant = {
                 tenantId: "heritage auto finance",
                 agencyName: "Heritage Auto Finance (Chirag Prajapati)",
+                headOffice: "Mehsana, Gujarat",
+                contactPhone: "+91 7600211085",
                 role: "client",
                 password: "123",
                 rentAmount: 3500,
@@ -1718,7 +1730,7 @@
                 <div>
                     <div style="font-size:1.1rem; font-weight:700; color:var(--primary);">🏢 ${t.agencyName}</div>
                     <div style="font-size:0.75rem; color:var(--text-muted); margin-top:3px;">
-                        Username: <strong style="color:var(--text);">${t.tenantId}</strong> | Rent: <strong style="color:#4ade80;">₹${t.rentAmount}/mo</strong> | Status: <span class="badge ${t.status === 'Active' ? 'badge-Active' : 'badge-Suspended'}">${t.status}</span> | Valid: ${t.expiryDate}
+                        Username: <strong style="color:var(--text);">${t.tenantId}</strong> | Office: <strong style="color:#38bdf8;">${t.headOffice || 'Mehsana'}</strong> | Phone: <strong style="color:#4ade80;">${t.contactPhone || '-'}</strong> | Rent: <strong>₹${t.rentAmount}/mo</strong> | Status: <span class="badge ${t.status === 'Active' ? 'badge-Active' : 'badge-Suspended'}">${t.status}</span>
                     </div>
                 </div>
 
@@ -1763,6 +1775,8 @@
         document.getElementById('t_tenantId').value = t.tenantId;
         document.getElementById('t_tenantId').readOnly = true;
         document.getElementById('t_agencyName').value = t.agencyName || '';
+        document.getElementById('t_headOffice').value = t.headOffice || 'Mehsana, Gujarat';
+        document.getElementById('t_contactPhone').value = t.contactPhone || '+91 7600211085';
         document.getElementById('t_password').value = t.password || '';
         document.getElementById('t_monthlyRent').value = t.rentAmount || 0;
         document.getElementById('t_expiryDate').value = t.expiryDate || '';
@@ -1777,6 +1791,8 @@
         document.getElementById('t_tenantId').value = '';
         document.getElementById('t_tenantId').readOnly = false;
         document.getElementById('t_agencyName').value = '';
+        document.getElementById('t_headOffice').value = 'Mehsana, Gujarat';
+        document.getElementById('t_contactPhone').value = '+91 7600211085';
         document.getElementById('t_password').value = '';
         document.getElementById('t_monthlyRent').value = '3000';
         const d = new Date(); d.setFullYear(d.getFullYear() + 1);
@@ -1795,13 +1811,15 @@
         const isEditing = document.getElementById('isEditingTenant').value === "true";
         const tid = document.getElementById('t_tenantId').value.trim().toLowerCase();
         const agency = document.getElementById('t_agencyName').value.trim();
+        const headOffice = document.getElementById('t_headOffice').value.trim();
+        const contactPhone = document.getElementById('t_contactPhone').value.trim();
         const pass = document.getElementById('t_password').value.trim();
         const rent = Number(document.getElementById('t_monthlyRent').value) || 0;
         const exp = document.getElementById('t_expiryDate').value;
         const stat = document.getElementById('t_status').value;
 
-        if (!tid || !agency || !pass) {
-            alert("Client ID, Agency Name aur Password required hai.");
+        if (!tid || !agency || !pass || !headOffice || !contactPhone) {
+            alert("Sabhi fields bharein (Client ID, Agency Name, Head Office, Contact Phone, Password).");
             return;
         }
 
@@ -1817,6 +1835,8 @@
             const tenantData = {
                 tenantId: tid,
                 agencyName: agency,
+                headOffice: headOffice,
+                contactPhone: contactPhone,
                 role: "client",
                 password: pass,
                 rentAmount: rent,
@@ -2292,7 +2312,11 @@
             return;
         }
 
-        document.getElementById('stmt_brand_title').textContent = (currentU ? currentU.agencyName : "HERITAGE AUTO FINANCE").toUpperCase();
+        const activeTenantId = inspectingTenantId || (currentU ? currentU.tenantId : '');
+        const currentTenantObj = tenantsCache.find(t => t.tenantId && t.tenantId.toLowerCase() === (activeTenantId || '').toLowerCase());
+        const brandName = currentTenantObj ? currentTenantObj.agencyName : (currentU ? currentU.agencyName : "HERITAGE AUTO FINANCE");
+
+        document.getElementById('stmt_brand_title').textContent = brandName.toUpperCase();
         document.getElementById('stmt_date').textContent = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
         document.getElementById('stmt_dealer').textContent = selectedDealer === 'All' ? 'All Partners' : selectedDealer;
         document.getElementById('stmt_total_files').textContent = targetLeads.length + ' Files';
@@ -2606,6 +2630,13 @@
         }
 
         const currentU = getCurrentSessionUser();
+        const activeTenantId = l.tenantId || l.createdBy || inspectingTenantId || (currentU ? currentU.tenantId : '');
+        const tenantObj = tenantsCache.find(t => t.tenantId && t.tenantId.toLowerCase() === (activeTenantId || '').toLowerCase());
+
+        const brandName = tenantObj ? tenantObj.agencyName : (currentU ? currentU.agencyName : "HERITAGE AUTO FINANCE");
+        const headOffice = tenantObj ? (tenantObj.headOffice || "Mehsana, Gujarat") : "Mehsana, Gujarat";
+        const contactPhone = tenantObj ? (tenantObj.contactPhone || "+91 7600211085") : "+91 7600211085";
+
         const appAmt = Number(String(l.approvedAmount || l.loanAmount || 0).replace(/[^0-9.]/g, '')) || 0;
         const grossDisbursed = Number(String(l.disbursedAmount || l.loanAmount || 0).replace(/[^0-9.]/g, '')) || appAmt;
         const rtoCharges = Number(String(l.rtoCharges || 0).replace(/[^0-9.]/g, '')) || 0;
@@ -2613,7 +2644,8 @@
         let bankCharges = Math.max(0, appAmt - grossDisbursed);
         let netDealerPayable = Math.max(0, grossDisbursed - rtoCharges);
 
-        document.getElementById('do_brand_title').textContent = (currentU ? currentU.agencyName : "HERITAGE AUTO FINANCE").toUpperCase();
+        document.getElementById('do_brand_title').textContent = brandName.toUpperCase();
+        document.getElementById('do_brand_sub').textContent = `HEAD OFFICE: ${headOffice.toUpperCase()} | CONTACT: ${contactPhone}`;
         document.getElementById('do_date').textContent = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
         document.getElementById('do_ref').textContent = 'DO/' + (l.docId ? l.docId.substring(0, 6).toUpperCase() : '001');
         document.getElementById('do_cust').textContent = l.name || '-';
@@ -2636,7 +2668,6 @@
         document.getElementById('doModal').style.display = 'none';
     };
 
-    // TENANT-SPECIFIC DEALER STORAGE FUNCTIONS
     function getCurrentTenantKey() {
         const u = getCurrentSessionUser();
         if (inspectingTenantId) return inspectingTenantId.trim().toLowerCase();
