@@ -1333,7 +1333,6 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore();
     const leadsCollection = db.collection('leads');
-    // Tenant accounts are stored in Firestore so admin-created users work on every device/domain.
     const tenantsCollection = db.collection('tenants');
     let tenantsCache = [];
     let tenantsReady = false;
@@ -1371,8 +1370,6 @@
     };
 
     function getStoredTenants() {
-        // Synchronous cache used by existing UI/report functions.
-        // Firestore is the authoritative source; tenantsCache is refreshed in realtime below.
         return Array.isArray(tenantsCache) ? tenantsCache : [];
     }
 
@@ -1408,49 +1405,14 @@
                 status: "Active"
             };
 
-            // First-time setup: create the built-in Heritage tenant if it does not exist.
             if (!existingIds.has(defaultTenant.tenantId)) {
                 await tenantsCollection.doc(defaultTenant.tenantId).set(defaultTenant);
             }
-
-            // One-time migration of any users previously saved in localStorage.
-            try {
-                const saved = JSON.parse(localStorage.getItem('haf_saas_clients_db'));
-                if (Array.isArray(saved)) {
-                    for (const t of saved) {
-                        if (!t || !t.tenantId) continue;
-                        const tid = String(t.tenantId).trim().toLowerCase();
-                        if (!tid || existingIds.has(tid)) continue;
-
-                        const tenant = {
-                            tenantId: tid,
-                            agencyName: t.agencyName || tid,
-                            role: t.role || "client",
-                            password: t.password || "",
-                            rentAmount: Number(t.rentAmount) || 0,
-                            expiryDate: t.expiryDate || "",
-                            status: t.status || "Active"
-                        };
-                        await tenantsCollection.doc(tid).set(tenant);
-                        existingIds.add(tid);
-                    }
-                }
-            } catch (migrationError) {
-                console.warn("Local tenant migration skipped:", migrationError);
-            }
-
             await loadTenantsFromFirestore();
         } catch (error) {
             console.error("Tenant initialization error:", error);
             await loadTenantsFromFirestore();
         }
-    }
-
-    function saveStoredTenants(arr) {
-        // Kept for compatibility with existing UI code.
-        // Do not use localStorage as the source of truth anymore.
-        tenantsCache = Array.isArray(arr) ? arr : [];
-        renderAdminMasterUserCards();
     }
 
     function getAdminPassword() {
@@ -1508,7 +1470,6 @@
             btn.textContent = "Checking...";
 
             try {
-                // IMPORTANT: Read the tenant from Firestore, not browser localStorage.
                 const snapshot = await tenantsCollection
                     .where('tenantId', '==', uid)
                     .limit(1)
@@ -1534,8 +1495,8 @@
                     loginError.style.display = 'block';
                 }
             } catch (error) {
-                console.error("Client login / Firestore error:", error);
-                loginError.textContent = "Login service error. Please check Firebase/Firestore connection.";
+                console.error("Client login error:", error);
+                loginError.textContent = "Login service error.";
                 loginError.style.display = 'block';
             } finally {
                 btn.disabled = false;
@@ -1550,7 +1511,6 @@
         location.reload();
     }
 
-    // CHANGE MY PASSWORD FUNCTIONS
     window.openChangeMyPasswordModal = function() {
         document.getElementById('cmp_oldPass').value = '';
         document.getElementById('cmp_newPass').value = '';
@@ -1595,9 +1555,6 @@
 
                         u.password = newP;
                         setCurrentSessionUser(u);
-                        const idx = tenantsCache.findIndex(t => t.tenantId && t.tenantId.toLowerCase() === uid);
-                        if (idx >= 0) tenantsCache[idx].password = newP;
-
                         alert("✓ Aapka password successfully update ho gaya!");
                         document.getElementById('changeMyPasswordModal').style.display = 'none';
                     } else {
@@ -1608,7 +1565,6 @@
                 }
             } catch (error) {
                 console.error("Change tenant password error:", error);
-                alert("❌ Password update nahi hua. Firebase/Firestore rules check karein.");
             }
         }
     };
@@ -1688,6 +1644,7 @@
             document.getElementById('clientPipelineTablePanel').style.display = 'block';
             document.getElementById('cardCustomerHold').style.display = 'block';
             document.getElementById('tabSecretPayouts').style.display = 'flex';
+            refreshDealerDropdowns();
             switchView('pipeline');
             return;
         }
@@ -1721,6 +1678,7 @@
             document.getElementById('clientPipelineTablePanel').style.display = 'block';
             document.getElementById('cardCustomerHold').style.display = 'block';
             document.getElementById('tabSecretPayouts').style.display = 'flex';
+            refreshDealerDropdowns();
             switchView('pipeline');
         }
     }
@@ -1798,10 +1756,7 @@
     window.openEditTenantModal = function(tid) {
         const tenants = getStoredTenants();
         const t = tenants.find(x => x.tenantId && x.tenantId.toLowerCase() === tid.toLowerCase());
-        if (!t) {
-            alert("Client data abhi load ho raha hai. Please 1-2 second baad try karein.");
-            return;
-        }
+        if (!t) return;
 
         document.getElementById('tenantModalTitle').textContent = "⚙️ Manage Client License & Validity";
         document.getElementById('isEditingTenant').value = "true";
@@ -1837,7 +1792,6 @@
 
     async function handleSaveTenantClient(e) {
         e.preventDefault();
-
         const isEditing = document.getElementById('isEditingTenant').value === "true";
         const tid = document.getElementById('t_tenantId').value.trim().toLowerCase();
         const agency = document.getElementById('t_agencyName').value.trim();
@@ -1872,24 +1826,11 @@
             };
 
             await docRef.set(tenantData, { merge: true });
-
-            // Update local cache immediately; realtime listener will also refresh it.
-            const idx = tenantsCache.findIndex(t => t.tenantId && t.tenantId.toLowerCase() === tid);
-            const cacheItem = { docId: tid, ...tenantData };
-            if (idx >= 0) tenantsCache[idx] = cacheItem;
-            else tenantsCache.push(cacheItem);
-
-            renderAdminMasterUserCards();
             closeAddTenantModal();
-
-            if (isEditing) {
-                alert(`✓ Client "${agency}" license successfully update ho gaya! Status: ${stat}`);
-            } else {
-                alert(`✓ Rented Client "${agency}" safaltapoorvak onboard ho gaya!\n\nAb ye user kisi bhi device/browser se login kar sakta hai.`);
-            }
+            alert(`✓ Client "${agency}" successfully save ho gaya!`);
         } catch (error) {
             console.error("Save tenant error:", error);
-            alert("❌ User save nahi hua. Firebase/Firestore rules aur internet connection check karein.");
+            alert("❌ User save nahi hua.");
         }
     }
 
@@ -1902,7 +1843,6 @@
         document.getElementById('billExpiry').textContent = expiryDate;
         document.getElementById('billRentAmt').textContent = formatINR(rentAmt);
         document.getElementById('billTotalPayable').textContent = formatINR(rentAmt);
-
         document.getElementById('adminRentBillModal').style.display = 'flex';
     };
 
@@ -2005,7 +1945,6 @@
             alert("✓ Client account delete ho gaya.");
         } catch (error) {
             console.error("Delete tenant error:", error);
-            alert("❌ Client delete nahi hua. Firebase/Firestore rules check karein.");
         }
     }
 
@@ -2048,27 +1987,18 @@
 
                     if (!snapshot.empty) {
                         const doc = snapshot.docs[0];
-                        const target = { docId: doc.id, ...doc.data() };
-
                         await doc.ref.update({
                             password: newPass,
                             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                         });
 
-                        const idx = tenantsCache.findIndex(t => t.tenantId && t.tenantId.toLowerCase() === uid);
-                        if (idx >= 0) {
-                            tenantsCache[idx].password = newPass;
-                        }
-
-                        renderAdminMasterUserCards();
-                        alert(`✓ User "${target.agencyName}" ka password update ho gaya!`);
+                        alert(`✓ Password update ho gaya!`);
                         closeResetPasswordModal();
                     } else {
-                        alert("User ID nahi mili! Kripya sahi Tenant ID darj karein.");
+                        alert("User ID nahi mili!");
                     }
                 } catch (error) {
-                    console.error("Reset tenant password error:", error);
-                    alert("❌ Password update nahi hua. Firebase/Firestore rules check karein.");
+                    console.error("Reset password error:", error);
                 }
             }
         } else {
@@ -2294,19 +2224,13 @@
         const l = leads.find(item => item.docId === docId);
         if (!l) return;
 
-        const newStatus = prompt(
-            `Kya aap "${l.name}" ki file ko wapas Live Pipeline me bhejna chahte hain?\n\nNaya status type karein (Sanctioned / Login Done / Documents Pending):`,
-            "Sanctioned"
-        );
-
+        const newStatus = prompt(`Naya status type karein (Sanctioned / Login Done / Documents Pending):`, "Sanctioned");
         if (!newStatus || newStatus.trim() === "") return;
 
         await leadsCollection.doc(docId).update({
             status: newStatus.trim(),
             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         });
-
-        alert(`✓ File "${l.name}" successfully Live Pipeline me wapas transfer ho gayi (${newStatus.trim()}).`);
         switchView('pipeline');
     };
 
@@ -2364,13 +2288,13 @@
         }
 
         if (targetLeads.length === 0) {
-            alert("Statement generate karne ke liye koi files nahi hain!");
+            alert("Statement ke liye koi files nahi hain!");
             return;
         }
 
         document.getElementById('stmt_brand_title').textContent = (currentU ? currentU.agencyName : "HERITAGE AUTO FINANCE").toUpperCase();
         document.getElementById('stmt_date').textContent = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-        document.getElementById('stmt_dealer').textContent = selectedDealer === 'All' ? 'All Channel Partners' : selectedDealer;
+        document.getElementById('stmt_dealer').textContent = selectedDealer === 'All' ? 'All Partners' : selectedDealer;
         document.getElementById('stmt_total_files').textContent = targetLeads.length + ' Files';
 
         let sumApproved = 0, sumPayable = 0;
@@ -2493,7 +2417,7 @@
         });
 
         document.getElementById('editDealerCutModal').style.display = 'none';
-        alert("✓ Dealer Cut successfully update ho gaya!");
+        alert("✓ Dealer Cut update ho gaya!");
     };
 
     function renderPayoutDeskTable() {
@@ -2511,7 +2435,7 @@
         let totalGross = 0, totalCuts = 0, totalNet = 0, totalReceived = 0;
 
         if (disbursedLeads.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="11" style="text-align:center; color:var(--text-muted); padding:25px;">Chune gaye mahine me koi payout record nahi mila.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="11" style="text-align:center; color:var(--text-muted); padding:25px;">Koi payout record nahi mila.</td></tr>';
             return;
         }
 
@@ -2519,7 +2443,6 @@
             const row = document.createElement('tr');
             const approvedBase = Number(String(l.approvedAmount || l.loanAmount || 0).replace(/[^0-9.]/g, '')) || 0;
             const rate = Number(l.commRate || 1.5);
-            
             const gross = Math.round((approvedBase * rate) / 100);
             
             let cut = 0;
@@ -2548,11 +2471,11 @@
                 <td><strong style="color:#4ade80;">${formatINR(approvedBase)}</strong></td>
                 <td>${rate}%</td>
                 <td>${formatINR(gross)}</td>
-                <td style="color:var(--danger);">${formatINR(cut)} ${cutType === 'percent' ? `(${cutRaw}%)` : ''}</td>
+                <td style="color:var(--danger);">${formatINR(cut)}</td>
                 <td><strong style="color:var(--success); font-size:0.95rem;">${formatINR(net)}</strong></td>
                 <td><span class="badge ${payoutBadge}">${pStatus}</span></td>
                 <td>
-                    <button class="btn-quick btn-edit" style="background:rgba(16,185,129,0.2); color:#34d399; border:1px solid #10b981; cursor:pointer;" onclick="openPayoutModal('${l.docId}')">💰 Edit Payout</button>
+                    <button class="btn-quick btn-edit" style="background:rgba(16,185,129,0.2); color:#34d399; border:1px solid #10b981; cursor:pointer;" onclick="openPayoutModal('${l.docId}')">💰 Edit</button>
                 </td>
             `;
             tbody.appendChild(row);
@@ -2577,7 +2500,6 @@
         const cutType = l.dealerCutType || 'amount';
         document.getElementById('ep_cutType').value = cutType;
         document.getElementById('ep_dealerCutVal').value = l.dealerCutRaw !== undefined ? l.dealerCutRaw : cutVal;
-
         document.getElementById('ep_status').value = l.payoutStatus || 'Pending';
         
         toggleCutTypeInput();
@@ -2603,14 +2525,7 @@
         const cutInputVal = Number(document.getElementById('ep_dealerCutVal').value) || 0;
 
         const gross = Math.round((appAmt * rate) / 100);
-        let actualCutAmt = 0;
-
-        if (cutType === 'percent') {
-            actualCutAmt = Math.round((appAmt * cutInputVal) / 100);
-        } else {
-            actualCutAmt = cutInputVal;
-        }
-
+        let actualCutAmt = cutType === 'percent' ? Math.round((appAmt * cutInputVal) / 100) : cutInputVal;
         const net = Math.max(0, gross - actualCutAmt);
 
         document.getElementById('ep_calcGross').value = formatINR(gross);
@@ -2646,7 +2561,7 @@
         });
 
         document.getElementById('editPayoutModal').style.display = 'none';
-        alert("✓ Payout calculation & status successfully update ho gaya!");
+        alert("✓ Payout update ho gaya!");
     };
 
     function renderFollowups() {
@@ -2658,7 +2573,7 @@
         tbody.innerHTML = '';
 
         if (todayLeads.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted); padding:25px;">Aaj ke liye koi follow-up pending nahi hai. Great job! 🎉</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted); padding:25px;">Aaj ke liye koi follow-up pending nahi hai.</td></tr>';
             return;
         }
 
@@ -2686,7 +2601,7 @@
         if (!l) return;
 
         if (l.status !== 'Sanctioned' && l.status !== 'Disbursed') {
-            alert(`⚠️ Delivery Order (DO) sirf Sanctioned ya Disbursed files ke liye generate ho sakta hai.`);
+            alert(`⚠️ Delivery Order sirf Sanctioned ya Disbursed files ke liye hai.`);
             return;
         }
 
@@ -2695,11 +2610,8 @@
         const grossDisbursed = Number(String(l.disbursedAmount || l.loanAmount || 0).replace(/[^0-9.]/g, '')) || appAmt;
         const rtoCharges = Number(String(l.rtoCharges || 0).replace(/[^0-9.]/g, '')) || 0;
 
-        let bankCharges = appAmt - grossDisbursed;
-        if (bankCharges < 0) bankCharges = 0;
-
-        let netDealerPayable = grossDisbursed - rtoCharges;
-        if (netDealerPayable < 0) netDealerPayable = 0;
+        let bankCharges = Math.max(0, appAmt - grossDisbursed);
+        let netDealerPayable = Math.max(0, grossDisbursed - rtoCharges);
 
         document.getElementById('do_brand_title').textContent = (currentU ? currentU.agencyName : "HERITAGE AUTO FINANCE").toUpperCase();
         document.getElementById('do_date').textContent = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -2707,8 +2619,8 @@
         document.getElementById('do_cust').textContent = l.name || '-';
         document.getElementById('do_mobile').textContent = l.mobile || '-';
         document.getElementById('do_vehicle').textContent = (l.vehModel || '-') + ' (' + (l.vehType || 'Car') + ')';
-        document.getElementById('do_bank').textContent = l.bankNbfc || 'Financier Partner Bank';
-        document.getElementById('do_dealer').textContent = l.dealerName || 'Direct Dealership';
+        document.getElementById('do_bank').textContent = l.bankNbfc || 'Financier';
+        document.getElementById('do_dealer').textContent = l.dealerName || 'Direct';
         document.getElementById('do_city').textContent = l.city || 'Mehsana';
 
         document.getElementById('do_approved').textContent = formatINR(appAmt);
@@ -2724,23 +2636,36 @@
         document.getElementById('doModal').style.display = 'none';
     };
 
+    // TENANT-SPECIFIC DEALER STORAGE FUNCTIONS
+    function getCurrentTenantKey() {
+        const u = getCurrentSessionUser();
+        if (inspectingTenantId) return inspectingTenantId.trim().toLowerCase();
+        if (u && u.role !== 'superadmin' && u.tenantId) return u.tenantId.trim().toLowerCase();
+        return 'heritage_auto_finance_default';
+    }
+
     function getStoredDealers() {
+        const tenantKey = getCurrentTenantKey();
+        const storageKey = 'haf_saved_dealers_' + tenantKey;
         const defaultDealers = ["Direct Customer", "Dipakbhai", "Ramadhani", "Patel Motors"];
         try {
-            const saved = JSON.parse(localStorage.getItem('haf_saved_dealers'));
+            const saved = JSON.parse(localStorage.getItem(storageKey));
             if (Array.isArray(saved) && saved.length > 0) return saved;
         } catch(e) {}
         return defaultDealers;
     }
 
     function saveStoredDealers(dealersArr) {
-        localStorage.setItem('haf_saved_dealers', JSON.stringify(dealersArr));
+        const tenantKey = getCurrentTenantKey();
+        const storageKey = 'haf_saved_dealers_' + tenantKey;
+        localStorage.setItem(storageKey, JSON.stringify(dealersArr));
         refreshDealerDropdowns();
     }
 
     function refreshDealerDropdowns() {
         const dealers = getStoredDealers();
         const formSelect = document.getElementById('dealerNameSelect');
+        if (!formSelect) return;
         const currentVal = formSelect.value;
         formSelect.innerHTML = '';
         dealers.forEach(d => {
@@ -2761,7 +2686,7 @@
             dealers.push(clean);
             saveStoredDealers(dealers);
             document.getElementById('dealerNameSelect').value = clean;
-            alert(`✓ Dealer "${clean}" safaltapoorvak add ho gaya!`);
+            alert(`✓ Dealer "${clean}" is tenant ke liye add ho gaya!`);
         } else {
             document.getElementById('dealerNameSelect').value = clean;
         }
@@ -2792,7 +2717,7 @@
     }
 
     function deleteDealerItem(dealerName) {
-        if (!confirm(`Kya aap "${dealerName}" ko list se delete karna chahte hain?`)) return;
+        if (!confirm(`Kya aap "${dealerName}" ko delete karna chahte hain?`)) return;
         let dealers = getStoredDealers();
         dealers = dealers.filter(d => d !== dealerName);
         saveStoredDealers(dealers);
@@ -2802,7 +2727,7 @@
 
     window.exportAllClientsToCSV = function() {
         if (!leads || leads.length === 0) {
-            alert("Export karne ke liye koi leads nahi hain!");
+            alert("Export ke liye koi leads nahi hain!");
             return;
         }
 
@@ -2848,8 +2773,6 @@
         document.body.removeChild(link);
     };
 
-    // TENANT REALTIME CLOUD SYNC
-    // This keeps the admin user list and login data synchronized across browsers/devices.
     tenantsCollection.onSnapshot((snapshot) => {
         tenantsCache = [];
         snapshot.forEach(doc => {
@@ -2858,13 +2781,11 @@
         tenantsReady = true;
         renderAdminMasterUserCards();
     }, (error) => {
-        console.error("Tenant realtime sync error:", error);
+        console.error("Tenant sync error:", error);
     });
 
-    // Seed the default account and migrate old localStorage users once.
     ensureDefaultTenantAndMigrateLocalData();
 
-    // REALTIME CLOUD SYNC
     leadsCollection.orderBy('updatedAt', 'desc').onSnapshot((snapshot) => {
         leads = [];
         snapshot.forEach(doc => {
@@ -3010,42 +2931,6 @@
             await leadsCollection.doc(docId).delete();
         }
     };
-
-    function exportToCSV() {
-        const scopedLeads = getLeadScopedList();
-        if (!scopedLeads || scopedLeads.length === 0) {
-            alert("Export karne ke liye koi leads nahi hain!");
-            return;
-        }
-
-        const headers = ["Customer Name", "Mobile Number", "City", "Vehicle Model", "Vehicle Type", "Dealer/Partner", "Lead Date", "Requested Loan", "Approved Loan", "Disbursed Loan", "Dealer Cut", "Disbursed Date", "Bank/NBFC", "Lead Status", "Remarks"];
-        const rows = scopedLeads.map(l => [
-            `"${(l.name || '').replace(/"/g, '""')}"`,
-            `"${(l.mobile || '').replace(/"/g, '""')}"`,
-            `"${(l.city || '').replace(/"/g, '""')}"`,
-            `"${(l.vehModel || '').replace(/"/g, '""')}"`,
-            `"${(l.vehType || '').replace(/"/g, '""')}"`,
-            `"${(l.dealerName || 'Direct Customer').replace(/"/g, '""')}"`,
-            `"${(l.leadDate || todayStr)}"`,
-            l.loanAmount || 0,
-            l.approvedAmount || l.loanAmount || 0,
-            l.disbursedAmount || l.loanAmount || 0,
-            l.dealerCut || 0,
-            `"${(l.disbursedDate || '').replace(/"/g, '""')}"`,
-            `"${(l.bankNbfc || '').replace(/"/g, '""')}"`,
-            `"${(l.status || '').replace(/"/g, '""')}"`,
-            `"${(l.lastConv || '').replace(/"/g, '""')}"`
-        ]);
-
-        const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
-        const encodedUri = encodeURI(csvContent);
-        const link = document.createElement("a");
-        link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `Auto_Finance_Leads_${todayStr}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-    }
 
     applyPortalPermissions();
     refreshDealerDropdowns();
