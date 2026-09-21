@@ -1333,6 +1333,10 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore();
     const leadsCollection = db.collection('leads');
+    // Tenant accounts are stored in Firestore so admin-created users work on every device/domain.
+    const tenantsCollection = db.collection('tenants');
+    let tenantsCache = [];
+    let tenantsReady = false;
 
     let leads = [];
     let pModalApprovedBase = 0;
@@ -1367,25 +1371,85 @@
     };
 
     function getStoredTenants() {
-        const defaultTenants = [
-            { tenantId: "heritage auto finance", agencyName: "Heritage Auto Finance (Chirag Prajapati)", role: "client", password: "123", rentAmount: 3500, expiryDate: "2029-12-31", status: "Active" }
-        ];
+        // Synchronous cache used by existing UI/report functions.
+        // Firestore is the authoritative source; tenantsCache is refreshed in realtime below.
+        return Array.isArray(tenantsCache) ? tenantsCache : [];
+    }
+
+    async function loadTenantsFromFirestore() {
         try {
-            const saved = JSON.parse(localStorage.getItem('haf_saas_clients_db'));
-            if (Array.isArray(saved) && saved.length > 0) {
-                if (!saved.find(t => t.tenantId.toLowerCase() === 'heritage auto finance')) {
-                    saved.unshift(defaultTenants[0]);
-                }
-                return saved;
-            } else {
-                localStorage.setItem('haf_saas_clients_db', JSON.stringify(defaultTenants));
+            const snapshot = await tenantsCollection.orderBy('tenantId').get();
+            tenantsCache = [];
+            snapshot.forEach(doc => {
+                tenantsCache.push({ docId: doc.id, ...doc.data() });
+            });
+            tenantsReady = true;
+            return tenantsCache;
+        } catch (error) {
+            console.error("Tenant load error:", error);
+            tenantsReady = false;
+            return [];
+        }
+    }
+
+    async function ensureDefaultTenantAndMigrateLocalData() {
+        try {
+            const snapshot = await tenantsCollection.get();
+            const existingIds = new Set();
+            snapshot.forEach(doc => existingIds.add((doc.data().tenantId || doc.id).toLowerCase()));
+
+            const defaultTenant = {
+                tenantId: "heritage auto finance",
+                agencyName: "Heritage Auto Finance (Chirag Prajapati)",
+                role: "client",
+                password: "123",
+                rentAmount: 3500,
+                expiryDate: "2029-12-31",
+                status: "Active"
+            };
+
+            // First-time setup: create the built-in Heritage tenant if it does not exist.
+            if (!existingIds.has(defaultTenant.tenantId)) {
+                await tenantsCollection.doc(defaultTenant.tenantId).set(defaultTenant);
             }
-        } catch(e) {}
-        return defaultTenants;
+
+            // One-time migration of any users previously saved in localStorage.
+            try {
+                const saved = JSON.parse(localStorage.getItem('haf_saas_clients_db'));
+                if (Array.isArray(saved)) {
+                    for (const t of saved) {
+                        if (!t || !t.tenantId) continue;
+                        const tid = String(t.tenantId).trim().toLowerCase();
+                        if (!tid || existingIds.has(tid)) continue;
+
+                        const tenant = {
+                            tenantId: tid,
+                            agencyName: t.agencyName || tid,
+                            role: t.role || "client",
+                            password: t.password || "",
+                            rentAmount: Number(t.rentAmount) || 0,
+                            expiryDate: t.expiryDate || "",
+                            status: t.status || "Active"
+                        };
+                        await tenantsCollection.doc(tid).set(tenant);
+                        existingIds.add(tid);
+                    }
+                }
+            } catch (migrationError) {
+                console.warn("Local tenant migration skipped:", migrationError);
+            }
+
+            await loadTenantsFromFirestore();
+        } catch (error) {
+            console.error("Tenant initialization error:", error);
+            await loadTenantsFromFirestore();
+        }
     }
 
     function saveStoredTenants(arr) {
-        localStorage.setItem('haf_saas_clients_db', JSON.stringify(arr));
+        // Kept for compatibility with existing UI code.
+        // Do not use localStorage as the source of truth anymore.
+        tenantsCache = Array.isArray(arr) ? arr : [];
         renderAdminMasterUserCards();
     }
 
@@ -1417,7 +1481,7 @@
         applyPortalPermissions();
     }
 
-    function handleUserLogin(e) {
+    async function handleUserLogin(e) {
         e.preventDefault();
         const pass = document.getElementById('loginPassword').value.trim();
 
@@ -1431,19 +1495,51 @@
             }
         } else {
             const uid = document.getElementById('loginUserId').value.trim().toLowerCase();
-            const tenants = getStoredTenants();
-            const matched = tenants.find(t => t.tenantId.toLowerCase() === uid && t.password === pass);
+            const loginError = document.getElementById('loginError');
 
-            if (matched) {
-                if (matched.status === 'Suspended') {
-                    alert("⚠️ Aapka software rent subscription suspend / inactive hai. Kripya IT Provider se sampark karein.");
-                    return;
+            if (!uid || !pass) {
+                loginError.style.display = 'block';
+                return;
+            }
+
+            const btn = document.getElementById('authSubmitBtn');
+            const oldText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = "Checking...";
+
+            try {
+                // IMPORTANT: Read the tenant from Firestore, not browser localStorage.
+                const snapshot = await tenantsCollection
+                    .where('tenantId', '==', uid)
+                    .limit(1)
+                    .get();
+
+                if (!snapshot.empty) {
+                    const doc = snapshot.docs[0];
+                    const matched = { docId: doc.id, ...doc.data() };
+
+                    if (matched.password === pass) {
+                        if (matched.status === 'Suspended') {
+                            alert("⚠️ Aapka software rent subscription suspend / inactive hai. Kripya IT Provider se sampark karein.");
+                            return;
+                        }
+
+                        loginError.style.display = 'none';
+                        document.getElementById('authOverlay').style.display = 'none';
+                        setCurrentSessionUser(matched);
+                    } else {
+                        loginError.style.display = 'block';
+                    }
+                } else {
+                    loginError.style.display = 'block';
                 }
-                document.getElementById('loginError').style.display = 'none';
-                document.getElementById('authOverlay').style.display = 'none';
-                setCurrentSessionUser(matched);
-            } else {
-                document.getElementById('loginError').style.display = 'block';
+            } catch (error) {
+                console.error("Client login / Firestore error:", error);
+                loginError.textContent = "Login service error. Please check Firebase/Firestore connection.";
+                loginError.style.display = 'block';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = oldText;
             }
         }
     }
@@ -1462,7 +1558,7 @@
         document.getElementById('changeMyPasswordModal').style.display = 'flex';
     };
 
-    window.handleSaveMyPassword = function(e) {
+    window.handleSaveMyPassword = async function(e) {
         e.preventDefault();
         const oldP = document.getElementById('cmp_oldPass').value.trim();
         const newP = document.getElementById('cmp_newPass').value.trim();
@@ -1480,17 +1576,39 @@
                 document.getElementById('cmpError').style.display = 'block';
             }
         } else {
-            const tenants = getStoredTenants();
-            const target = tenants.find(t => t.tenantId.toLowerCase() === u.tenantId.toLowerCase());
-            if (target && target.password === oldP) {
-                target.password = newP;
-                saveStoredTenants(tenants);
-                u.password = newP;
-                setCurrentSessionUser(u);
-                alert("✓ Aapka password successfully update ho gaya!");
-                document.getElementById('changeMyPasswordModal').style.display = 'none';
-            } else {
-                document.getElementById('cmpError').style.display = 'block';
+            try {
+                const uid = u.tenantId.toLowerCase();
+                const snapshot = await tenantsCollection
+                    .where('tenantId', '==', uid)
+                    .limit(1)
+                    .get();
+
+                if (!snapshot.empty) {
+                    const doc = snapshot.docs[0];
+                    const target = doc.data();
+
+                    if (target.password === oldP) {
+                        await doc.ref.update({
+                            password: newP,
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                        });
+
+                        u.password = newP;
+                        setCurrentSessionUser(u);
+                        const idx = tenantsCache.findIndex(t => t.tenantId && t.tenantId.toLowerCase() === uid);
+                        if (idx >= 0) tenantsCache[idx].password = newP;
+
+                        alert("✓ Aapka password successfully update ho gaya!");
+                        document.getElementById('changeMyPasswordModal').style.display = 'none';
+                    } else {
+                        document.getElementById('cmpError').style.display = 'block';
+                    }
+                } else {
+                    document.getElementById('cmpError').style.display = 'block';
+                }
+            } catch (error) {
+                console.error("Change tenant password error:", error);
+                alert("❌ Password update nahi hua. Firebase/Firestore rules check karein.");
             }
         }
     };
@@ -1609,6 +1727,7 @@
 
     function renderAdminMasterUserCards() {
         const tenants = getStoredTenants();
+        if (!Array.isArray(tenants)) return;
         const container = document.getElementById('userCardsContainer');
         container.innerHTML = '';
 
@@ -1678,18 +1797,21 @@
 
     window.openEditTenantModal = function(tid) {
         const tenants = getStoredTenants();
-        const t = tenants.find(x => x.tenantId.toLowerCase() === tid.toLowerCase());
-        if (!t) return;
+        const t = tenants.find(x => x.tenantId && x.tenantId.toLowerCase() === tid.toLowerCase());
+        if (!t) {
+            alert("Client data abhi load ho raha hai. Please 1-2 second baad try karein.");
+            return;
+        }
 
         document.getElementById('tenantModalTitle').textContent = "⚙️ Manage Client License & Validity";
         document.getElementById('isEditingTenant').value = "true";
         document.getElementById('t_tenantId').value = t.tenantId;
         document.getElementById('t_tenantId').readOnly = true;
-        document.getElementById('t_agencyName').value = t.agencyName;
-        document.getElementById('t_password').value = t.password;
-        document.getElementById('t_monthlyRent').value = t.rentAmount;
-        document.getElementById('t_expiryDate').value = t.expiryDate;
-        document.getElementById('t_status').value = t.status;
+        document.getElementById('t_agencyName').value = t.agencyName || '';
+        document.getElementById('t_password').value = t.password || '';
+        document.getElementById('t_monthlyRent').value = t.rentAmount || 0;
+        document.getElementById('t_expiryDate').value = t.expiryDate || '';
+        document.getElementById('t_status').value = t.status || 'Active';
 
         document.getElementById('saasTenantModal').style.display = 'flex';
     };
@@ -1713,8 +1835,9 @@
         document.getElementById('saasTenantModal').style.display = 'none';
     }
 
-    function handleSaveTenantClient(e) {
+    async function handleSaveTenantClient(e) {
         e.preventDefault();
+
         const isEditing = document.getElementById('isEditingTenant').value === "true";
         const tid = document.getElementById('t_tenantId').value.trim().toLowerCase();
         const agency = document.getElementById('t_agencyName').value.trim();
@@ -1723,22 +1846,51 @@
         const exp = document.getElementById('t_expiryDate').value;
         const stat = document.getElementById('t_status').value;
 
-        const tenants = getStoredTenants();
-        const existingIdx = tenants.findIndex(t => t.tenantId.toLowerCase() === tid);
-
-        if (isEditing && existingIdx !== -1) {
-            tenants[existingIdx] = { tenantId: tid, agencyName: agency, role: "client", password: pass, rentAmount: rent, expiryDate: exp, status: stat };
-            alert(`✓ Client "${agency}" license successfully update ho gaya! Status: ${stat}`);
-        } else if (!isEditing && existingIdx !== -1) {
-            alert("Ye Client ID pehle se registered hai.");
+        if (!tid || !agency || !pass) {
+            alert("Client ID, Agency Name aur Password required hai.");
             return;
-        } else {
-            tenants.push({ tenantId: tid, agencyName: agency, role: "client", password: pass, rentAmount: rent, expiryDate: exp, status: stat });
-            alert(`✓ Rented Client "${agency}" safaltapoorvak onboared ho gaya!`);
         }
 
-        saveStoredTenants(tenants);
-        closeAddTenantModal();
+        try {
+            const docRef = tenantsCollection.doc(tid);
+            const existing = await docRef.get();
+
+            if (!isEditing && existing.exists) {
+                alert("Ye Client ID pehle se registered hai.");
+                return;
+            }
+
+            const tenantData = {
+                tenantId: tid,
+                agencyName: agency,
+                role: "client",
+                password: pass,
+                rentAmount: rent,
+                expiryDate: exp,
+                status: stat,
+                updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+            };
+
+            await docRef.set(tenantData, { merge: true });
+
+            // Update local cache immediately; realtime listener will also refresh it.
+            const idx = tenantsCache.findIndex(t => t.tenantId && t.tenantId.toLowerCase() === tid);
+            const cacheItem = { docId: tid, ...tenantData };
+            if (idx >= 0) tenantsCache[idx] = cacheItem;
+            else tenantsCache.push(cacheItem);
+
+            renderAdminMasterUserCards();
+            closeAddTenantModal();
+
+            if (isEditing) {
+                alert(`✓ Client "${agency}" license successfully update ho gaya! Status: ${stat}`);
+            } else {
+                alert(`✓ Rented Client "${agency}" safaltapoorvak onboard ho gaya!\n\nAb ye user kisi bhi device/browser se login kar sakta hai.`);
+            }
+        } catch (error) {
+            console.error("Save tenant error:", error);
+            alert("❌ User save nahi hua. Firebase/Firestore rules aur internet connection check karein.");
+        }
     }
 
     window.openAdminRentBillModal = function(tid, agencyName, rentAmt, expiryDate) {
@@ -1843,11 +1995,18 @@
         renderViews();
     };
 
-    function deleteTenantAccount(tid) {
+    async function deleteTenantAccount(tid) {
         if (!confirm(`Kya aap client "${tid}" ko delete karna chahte hain?`)) return;
-        let tenants = getStoredTenants();
-        tenants = tenants.filter(t => t.tenantId.toLowerCase() !== tid.toLowerCase());
-        saveStoredTenants(tenants);
+
+        try {
+            await tenantsCollection.doc(tid.toLowerCase()).delete();
+            tenantsCache = tenantsCache.filter(t => !t.tenantId || t.tenantId.toLowerCase() !== tid.toLowerCase());
+            renderAdminMasterUserCards();
+            alert("✓ Client account delete ho gaya.");
+        } catch (error) {
+            console.error("Delete tenant error:", error);
+            alert("❌ Client delete nahi hua. Firebase/Firestore rules check karein.");
+        }
     }
 
     function toggleResetUserField() {
@@ -1867,7 +2026,7 @@
         document.getElementById('passwordResetModal').style.display = 'none';
     }
 
-    function handleResetPasswordSubmit(e) {
+    async function handleResetPasswordSubmit(e) {
         e.preventDefault();
         const role = document.getElementById('resetRoleTarget').value;
         const phone = document.getElementById('resetInputPhone').value.trim();
@@ -1880,15 +2039,36 @@
                 closeResetPasswordModal();
             } else {
                 const uid = document.getElementById('resetInputUserId').value.trim().toLowerCase();
-                let tenants = getStoredTenants();
-                const target = tenants.find(t => t.tenantId.toLowerCase() === uid);
-                if (target) {
-                    target.password = newPass;
-                    saveStoredTenants(tenants);
-                    alert(`✓ User "${target.agencyName}" ka password update ho gaya!`);
-                    closeResetPasswordModal();
-                } else {
-                    alert("User ID nahi mili! Kripya sahi Tenant ID darj karein.");
+
+                try {
+                    const snapshot = await tenantsCollection
+                        .where('tenantId', '==', uid)
+                        .limit(1)
+                        .get();
+
+                    if (!snapshot.empty) {
+                        const doc = snapshot.docs[0];
+                        const target = { docId: doc.id, ...doc.data() };
+
+                        await doc.ref.update({
+                            password: newPass,
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                        });
+
+                        const idx = tenantsCache.findIndex(t => t.tenantId && t.tenantId.toLowerCase() === uid);
+                        if (idx >= 0) {
+                            tenantsCache[idx].password = newPass;
+                        }
+
+                        renderAdminMasterUserCards();
+                        alert(`✓ User "${target.agencyName}" ka password update ho gaya!`);
+                        closeResetPasswordModal();
+                    } else {
+                        alert("User ID nahi mili! Kripya sahi Tenant ID darj karein.");
+                    }
+                } catch (error) {
+                    console.error("Reset tenant password error:", error);
+                    alert("❌ Password update nahi hua. Firebase/Firestore rules check karein.");
                 }
             }
         } else {
@@ -2667,6 +2847,22 @@
         link.click();
         document.body.removeChild(link);
     };
+
+    // TENANT REALTIME CLOUD SYNC
+    // This keeps the admin user list and login data synchronized across browsers/devices.
+    tenantsCollection.onSnapshot((snapshot) => {
+        tenantsCache = [];
+        snapshot.forEach(doc => {
+            tenantsCache.push({ docId: doc.id, ...doc.data() });
+        });
+        tenantsReady = true;
+        renderAdminMasterUserCards();
+    }, (error) => {
+        console.error("Tenant realtime sync error:", error);
+    });
+
+    // Seed the default account and migrate old localStorage users once.
+    ensureDefaultTenantAndMigrateLocalData();
 
     // REALTIME CLOUD SYNC
     leadsCollection.orderBy('updatedAt', 'desc').onSnapshot((snapshot) => {
